@@ -29,25 +29,29 @@ uint8_t receiverMacAddress[] = {0xDC, 0xB4, 0xD9, 0x8B, 0xD0, 0xFC};
 
 // ================= RECEIVER =================
 #if defined(RECEIVER)
+
+// ---------- Ultrasonic ----------
+#define TRIG_PIN 7
+#define ECHO_PIN 9
+
+volatile float g_distance_cm = 0.0;
+volatile bool g_obstacle = false;
+
+// ---------- Servo ----------
 #define SERVO_PIN     8
 #define SERVO_MIN_US  500
 #define SERVO_MAX_US  2400
 
+// ---------- Motor ----------
 #define CW_PIN   5
 #define CCW_PIN  4
-//#define EN_PIN   6
-
-/*const int pwmChannel = 0;
-const int pwmFreq = 20000;
-const int pwmResolution = 8;
-
-int duty = 0;*/
 
 Servo servo;
 
-// RX buffer (NO HARDWARE CONTROL IN CALLBACK)
+// ---------- RX buffer ----------
 volatile packet_t rxData;
 volatile bool newPacket = false;
+
 #endif
 
 // ================= CALLBACKS =================
@@ -62,6 +66,39 @@ void onDataRecv(const uint8_t *, const uint8_t *incomingData, int len) {
   newPacket = true;
 #endif
 }
+
+// ================= ULTRASONIC TASK =================
+#if defined(RECEIVER)
+void ultrasonicTask(void *pvParameters)
+{
+  static unsigned long lastPrint = 0;
+  for (;;)
+  {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+
+    unsigned long duration = pulseIn(ECHO_PIN, HIGH, 25000);
+
+    float d = 0.0;
+    if (duration > 0)
+      d = (duration * 0.0343f) / 2.0f;
+
+    g_distance_cm = d;
+    g_obstacle = (d > 0 && d < 10.0f);
+    if (millis() - lastPrint > 300)   // ~3 Hz
+    {
+      lastPrint = millis();
+      Serial.print("[US] Distance: ");
+      Serial.print(g_distance_cm);
+      Serial.println(" cm");
+    }
+    vTaskDelay(pdMS_TO_TICKS(50)); // 20 Hz
+  }
+}
+#endif
 
 // ================= SETUP =================
 void setup() {
@@ -101,6 +138,9 @@ void setup() {
 #endif
 
 #if defined(RECEIVER)
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
@@ -111,13 +151,22 @@ void setup() {
 
   pinMode(CW_PIN, OUTPUT);
   pinMode(CCW_PIN, OUTPUT);
-  //pinMode(EN_PIN, OUTPUT);
 
   digitalWrite(CW_PIN, LOW);
   digitalWrite(CCW_PIN, LOW);
-  //digitalWrite(EN_PIN, LOW);  // Try LOW - some drivers enable with LOW
 
   esp_now_register_recv_cb(onDataRecv);
+
+  // --- Create ultrasonic task ---
+  xTaskCreatePinnedToCore(
+    ultrasonicTask,
+    "Ultrasonic",
+    2048,
+    NULL,
+    2,
+    NULL,
+    1
+  );
 #endif
 
   Serial.println("SETUP COMPLETE");
@@ -128,23 +177,10 @@ void loop() {
 
 #if defined(SENDER)
   data.value = analogRead(POT_PIN);
+  data.forward = digitalRead(FORWARD_BTN) == HIGH;
+  data.backward = digitalRead(BACKWARD_BTN) == HIGH;
 
-  // Buttons connected to 3.3V, so HIGH = pressed
-  data.forward = (digitalRead(FORWARD_BTN) == HIGH) ? 1 : 0;
-  data.backward = (digitalRead(BACKWARD_BTN) == HIGH) ? 1 : 0;
-
-  esp_now_send(
-    receiverMacAddress,
-    (uint8_t *)&data,
-    sizeof(data)
-  );
-
-  Serial.printf(
-    "TX ADC=%d FWD=%d BWD=%d\n",
-    data.value,
-    data.forward,
-    data.backward
-  );
+  esp_now_send(receiverMacAddress, (uint8_t *)&data, sizeof(data));
 
   delay(20);
 #endif
@@ -153,42 +189,38 @@ void loop() {
   if (newPacket) {
     newPacket = false;
 
-    // Copy volatile data to local variables
     packet_t localData;
     noInterrupts();
     memcpy(&localData, (void*)&rxData, sizeof(packet_t));
     interrupts();
 
-    int pulseUs = map(
-      localData.value,
-      0, 4095,
-      SERVO_MIN_US, SERVO_MAX_US
-    );
+    // ----- SERVO (always allowed) -----
+    int pulseUs = map(localData.value, 0, 4095, SERVO_MIN_US, SERVO_MAX_US);
     pulseUs = constrain(pulseUs, SERVO_MIN_US, SERVO_MAX_US);
     servo.writeMicroseconds(pulseUs);
 
-    if (localData.forward && !localData.backward) {
-      digitalWrite(CW_PIN, HIGH);
-      digitalWrite(CCW_PIN, LOW);
-      Serial.println("MOTOR: FORWARD");
-    }
-    else if (localData.backward && !localData.forward) {
-      digitalWrite(CW_PIN, LOW);
-      digitalWrite(CCW_PIN, HIGH);
-      Serial.println("MOTOR: BACKWARD");
-    }
-    else {
+    // ----- MOTOR (urgent stop override) -----
+    if (g_obstacle)
+    {
       digitalWrite(CW_PIN, LOW);
       digitalWrite(CCW_PIN, LOW);
-      Serial.println("MOTOR: STOP");
+      Serial.println("OBJECT AHEAD → MOTOR STOP");
     }
-
-    Serial.printf(
-      "RX ADC=%d FWD=%d BWD=%d\n",
-      localData.value,
-      localData.forward,
-      localData.backward
-    );
+    else
+    {
+      if (localData.forward && !localData.backward) {
+        digitalWrite(CW_PIN, HIGH);
+        digitalWrite(CCW_PIN, LOW);
+      }
+      else if (localData.backward && !localData.forward) {
+        digitalWrite(CW_PIN, LOW);
+        digitalWrite(CCW_PIN, HIGH);
+      }
+      else {
+        digitalWrite(CW_PIN, LOW);
+        digitalWrite(CCW_PIN, LOW);
+      }
+    }
   }
 
   delay(5);
