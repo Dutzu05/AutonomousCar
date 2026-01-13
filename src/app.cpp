@@ -64,8 +64,9 @@ volatile bool g_obstacle = false;
 #define SERVO_MAX_US 2400
 int lastManualServoUs = (SERVO_MIN_US + SERVO_MAX_US) / 2;
 
-#define SERVO_LEFT_OFFSET 700
-#define SERVO_RIGHT_OFFSET 700
+#define SERVO_LEFT_OFFSET 250
+#define SERVO_RIGHT_OFFSET 250
+#define AVOIDANCE_LIMIT_US 300
 
 // ---------- Motor ----------
 #define CW_PIN 5
@@ -298,12 +299,15 @@ void loop()
 
       if (now - obstacleStartTime > 5000)
       {
-        savedServoUs = lastManualServoUs;       // <-- save the last manual command
+        savedServoUs = lastManualServoUs; // <-- save the last manual command
         savedMotorDir = desiredDir;
         stateStartTime = now;
 
         servo.writeMicroseconds(
-            clampServo(savedServoUs - SERVO_LEFT_OFFSET));
+            clampServo(constrain(
+                savedServoUs - SERVO_LEFT_OFFSET,
+                lastManualServoUs - AVOIDANCE_LIMIT_US,
+                lastManualServoUs + AVOIDANCE_LIMIT_US)));
         motionState = MOVE_LEFT;
         Serial.println("START AVOIDANCE");
       }
