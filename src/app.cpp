@@ -5,10 +5,11 @@
 #include <ESP32Servo.h>
 
 // ================= DATA STRUCTURE =================
-typedef struct {
-  int value;          // ADC value (0–4095)
-  uint8_t forward;   // 1 = pressed
-  uint8_t backward;  // 1 = pressed
+typedef struct
+{
+  int value;        // ADC value (0–4095)
+  uint8_t forward;  // 1 = pressed
+  uint8_t backward; // 1 = pressed
 } packet_t;
 
 packet_t data;
@@ -22,13 +23,33 @@ uint8_t receiverMacAddress[] = {0xDC, 0xB4, 0xD9, 0x8B, 0xD0, 0xFC};
 
 // ================= SENDER =================
 #if defined(SENDER)
-#define POT_PIN       1
-#define FORWARD_BTN   4
-#define BACKWARD_BTN  5
+#define POT_PIN 1
+#define FORWARD_BTN 4
+#define BACKWARD_BTN 5
 #endif
 
 // ================= RECEIVER =================
 #if defined(RECEIVER)
+
+// ---------- Motion override state ----------
+enum MotionState
+{
+  NORMAL,
+  WAIT_OBSTACLE,
+  AVOID_LEFT,
+  MOVE_LEFT,
+  AVOID_RIGHT,
+  MOVE_RIGHT,
+  RESTORE
+};
+
+volatile MotionState motionState = NORMAL;
+
+unsigned long obstacleStartTime = 0;
+unsigned long stateStartTime = 0;
+
+int savedServoUs = 0;
+int savedMotorDir = 0; // 1 fwd -1 bkwd, 0 stop
 
 // ---------- Ultrasonic ----------
 #define TRIG_PIN 7
@@ -38,13 +59,17 @@ volatile float g_distance_cm = 0.0;
 volatile bool g_obstacle = false;
 
 // ---------- Servo ----------
-#define SERVO_PIN     8
-#define SERVO_MIN_US  500
-#define SERVO_MAX_US  2400
+#define SERVO_PIN 8
+#define SERVO_MIN_US 500
+#define SERVO_MAX_US 2400
+int lastManualServoUs = (SERVO_MIN_US + SERVO_MAX_US) / 2;
+
+#define SERVO_LEFT_OFFSET 700
+#define SERVO_RIGHT_OFFSET 700
 
 // ---------- Motor ----------
-#define CW_PIN   5
-#define CCW_PIN  4
+#define CW_PIN 5
+#define CCW_PIN 4
 
 Servo servo;
 
@@ -54,15 +79,26 @@ volatile bool newPacket = false;
 
 #endif
 
+// ================= HELPERS =================
+#if defined(RECEIVER)
+int clampServo(int us)
+{
+  return constrain(us, SERVO_MIN_US, SERVO_MAX_US);
+}
+#endif
+
 // ================= CALLBACKS =================
-void onDataSent(const uint8_t *, esp_now_send_status_t status) {
+void onDataSent(const uint8_t *, esp_now_send_status_t status)
+{
   Serial.println(status == ESP_NOW_SEND_SUCCESS ? "SEND OK" : "SEND FAIL");
 }
 
-void onDataRecv(const uint8_t *, const uint8_t *incomingData, int len) {
+void onDataRecv(const uint8_t *, const uint8_t *incomingData, int len)
+{
 #if defined(RECEIVER)
-  if (len != sizeof(packet_t)) return;
-  memcpy((void*)&rxData, incomingData, sizeof(packet_t));
+  if (len != sizeof(packet_t))
+    return;
+  memcpy((void *)&rxData, incomingData, sizeof(packet_t));
   newPacket = true;
 #endif
 }
@@ -88,20 +124,23 @@ void ultrasonicTask(void *pvParameters)
 
     g_distance_cm = d;
     g_obstacle = (d > 0 && d < 10.0f);
-    if (millis() - lastPrint > 300)   // ~3 Hz
+
+    if (millis() - lastPrint > 300)
     {
       lastPrint = millis();
       Serial.print("[US] Distance: ");
       Serial.print(g_distance_cm);
       Serial.println(" cm");
     }
-    vTaskDelay(pdMS_TO_TICKS(50)); // 20 Hz
+
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 #endif
 
 // ================= SETUP =================
-void setup() {
+void setup()
+{
   Serial.begin(115200);
   delay(1000);
 
@@ -112,9 +151,11 @@ void setup() {
   Serial.print("MAC: ");
   Serial.println(WiFi.macAddress());
 
-  if (esp_now_init() != ESP_OK) {
+  if (esp_now_init() != ESP_OK)
+  {
     Serial.println("ESP-NOW INIT FAILED");
-    while (true);
+    while (true)
+      ;
   }
 
 #if defined(SENDER)
@@ -131,9 +172,11 @@ void setup() {
   peerInfo.channel = 0;
   peerInfo.encrypt = false;
 
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+  if (esp_now_add_peer(&peerInfo) != ESP_OK)
+  {
     Serial.println("FAILED TO ADD PEER");
-    while (true);
+    while (true)
+      ;
   }
 #endif
 
@@ -157,23 +200,22 @@ void setup() {
 
   esp_now_register_recv_cb(onDataRecv);
 
-  // --- Create ultrasonic task ---
   xTaskCreatePinnedToCore(
-    ultrasonicTask,
-    "Ultrasonic",
-    2048,
-    NULL,
-    2,
-    NULL,
-    1
-  );
+      ultrasonicTask,
+      "Ultrasonic",
+      2048,
+      NULL,
+      2,
+      NULL,
+      1);
 #endif
 
   Serial.println("SETUP COMPLETE");
 }
 
 // ================= LOOP =================
-void loop() {
+void loop()
+{
 
 #if defined(SENDER)
   data.value = analogRead(POT_PIN);
@@ -186,40 +228,131 @@ void loop() {
 #endif
 
 #if defined(RECEIVER)
-  if (newPacket) {
+  if (newPacket)
+  {
     newPacket = false;
 
     packet_t localData;
     noInterrupts();
-    memcpy(&localData, (void*)&rxData, sizeof(packet_t));
+    memcpy(&localData, (void *)&rxData, sizeof(packet_t));
     interrupts();
 
-    // ----- SERVO (always allowed) -----
-    int pulseUs = map(localData.value, 0, 4095, SERVO_MIN_US, SERVO_MAX_US);
-    pulseUs = constrain(pulseUs, SERVO_MIN_US, SERVO_MAX_US);
-    servo.writeMicroseconds(pulseUs);
-
-    // ----- MOTOR (urgent stop override) -----
-    if (g_obstacle)
+    // ----- SERVO (manual only in NORMAL) -----
+    if (motionState == NORMAL)
     {
+      int pulseUs = map(localData.value, 0, 4095, SERVO_MIN_US, SERVO_MAX_US);
+      pulseUs = constrain(pulseUs, SERVO_MIN_US, SERVO_MAX_US);
+
+      lastManualServoUs = pulseUs; // <-- track what manual wants
+      servo.writeMicroseconds(pulseUs);
+    }
+
+    unsigned long now = millis();
+    int desiredDir = 0;
+    if (localData.forward && !localData.backward)
+      desiredDir = 1;
+    else if (!localData.forward && localData.backward)
+      desiredDir = -1;
+
+    // ----- STATE MACHINE -----
+    switch (motionState)
+    {
+    case NORMAL:
+      if (g_obstacle)
+      {
+        obstacleStartTime = now;
+        motionState = WAIT_OBSTACLE;
+        digitalWrite(CW_PIN, LOW);
+        digitalWrite(CCW_PIN, LOW);
+        Serial.println("OBJECT DETECTED ... WAITING");
+      }
+      else
+      {
+        if (desiredDir == 1)
+        {
+          digitalWrite(CW_PIN, HIGH);
+          digitalWrite(CCW_PIN, LOW);
+        }
+        else if (desiredDir == -1)
+        {
+          digitalWrite(CW_PIN, LOW);
+          digitalWrite(CCW_PIN, HIGH);
+        }
+        else
+        {
+          digitalWrite(CW_PIN, LOW);
+          digitalWrite(CCW_PIN, LOW);
+        }
+      }
+      break;
+
+    case WAIT_OBSTACLE:
       digitalWrite(CW_PIN, LOW);
       digitalWrite(CCW_PIN, LOW);
-      Serial.println("OBJECT AHEAD → MOTOR STOP");
-    }
-    else
-    {
-      if (localData.forward && !localData.backward) {
-        digitalWrite(CW_PIN, HIGH);
-        digitalWrite(CCW_PIN, LOW);
+
+      if (!g_obstacle)
+      {
+        motionState = NORMAL;
+        break;
       }
-      else if (localData.backward && !localData.forward) {
+
+      if (now - obstacleStartTime > 5000)
+      {
+        savedServoUs = lastManualServoUs;       // <-- save the last manual command
+        savedMotorDir = desiredDir;
+        stateStartTime = now;
+
+        servo.writeMicroseconds(
+            clampServo(savedServoUs - SERVO_LEFT_OFFSET));
+        motionState = MOVE_LEFT;
+        Serial.println("START AVOIDANCE");
+      }
+      break;
+
+    case MOVE_LEFT:
+      digitalWrite(CW_PIN, savedMotorDir == 1);
+      digitalWrite(CCW_PIN, savedMotorDir == -1);
+
+      if (now - stateStartTime > 4000)
+      {
         digitalWrite(CW_PIN, LOW);
-        digitalWrite(CCW_PIN, HIGH);
+        digitalWrite(CCW_PIN, LOW);
+
+        servo.writeMicroseconds(
+            clampServo(savedServoUs + SERVO_RIGHT_OFFSET));
+        stateStartTime = now;
+        motionState = MOVE_RIGHT;
+        Serial.println("MOVING RIGHT NOW");
       }
-      else {
+      break;
+
+    case MOVE_RIGHT:
+      digitalWrite(CW_PIN, savedMotorDir == 1);
+      digitalWrite(CCW_PIN, savedMotorDir == -1);
+
+      if (now - stateStartTime > 4000)
+      {
         digitalWrite(CW_PIN, LOW);
         digitalWrite(CCW_PIN, LOW);
+
+        servo.writeMicroseconds(savedServoUs);
+        motionState = RESTORE;
+        stateStartTime = now;
+        Serial.println("RESTORING THE POSITION");
       }
+      break;
+
+    case RESTORE:
+      if (now - stateStartTime > 1500)
+      {
+        motionState = NORMAL;
+        Serial.println("AVOIDANCE COMPLETE");
+      }
+      break;
+
+    default:
+      motionState = NORMAL;
+      break;
     }
   }
 
