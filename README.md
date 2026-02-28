@@ -23,7 +23,7 @@
 
 ## 🎯 Overview
 
-This project implements a wireless remote control system for an autonomous car using two ESP32-C3 microcontrollers. The system uses ESP-NOW for low-latency, peer-to-peer communication between a transmitter (controller) and receiver (car).
+This project implements a wireless remote control system for an autonomous car using two ESP32-C3 microcontrollers. The system uses ESP-NOW for low-latency, peer-to-peer communication between a transmitter (controller) and receiver (car). For a smaller prototype I made my own perf-board PCB H-bridge driver.
 
 ## ✨ Features
 
